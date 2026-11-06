@@ -21,7 +21,6 @@ const char KEY_WORD[] = "TRIANGLE";
 const unsigned long DEBOUNCE_MS     = 50;
 const unsigned long NEW_PATTERN_MS  = 1500;  // "NEW PATTERN" splash
 const unsigned long CONGRATS_MS     = 3000;  // "CONGRATS!" splash
-const unsigned long KEY_MIN_SHOW_MS = 5000;  // key stays up at least this long
 const unsigned long POLL_MS         = 100;   // how often switches are read
 
 const int SCORE_NONE  = -1;  // nothing shown yet (forces a redraw)
@@ -35,7 +34,7 @@ enum GameState
   NEW_PATTERN,  // showing "NEW PATTERN" splash
   PLAYING,      // showing score, waiting for 16/16
   CONGRATS,     // showing "CONGRATS!" splash
-  SOLVED        // showing the key word
+  SOLVED        // showing the key word until RESET is pressed
 };
 
 GameState state = WAITING;
@@ -301,11 +300,8 @@ void loop()
       break;
 
     case SOLVED:
-      // Keep the key on screen; go back to playing if a switch is moved.
-      if (elapsed >= KEY_MIN_SHOW_MS && pollDue() && readScore() != TOTAL_SWITCHES)
-      {
-        enterState(PLAYING);
-      }
+      // Puzzle stays solved: the key remains on screen until RESET,
+      // even if the switches are moved afterwards.
       break;
   }
 }
