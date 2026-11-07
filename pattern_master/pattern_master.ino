@@ -22,6 +22,7 @@ const unsigned long DEBOUNCE_MS     = 50;
 const unsigned long NEW_PATTERN_MS  = 1500;  // "NEW PATTERN" splash
 const unsigned long CONGRATS_MS     = 3000;  // "CONGRATS!" splash
 const unsigned long POLL_MS         = 100;   // how often switches are read
+const unsigned long MONITOR_MS      = 20;    // how often the wiring monitor checks
 
 const int SCORE_NONE  = -1;  // nothing shown yet (forces a redraw)
 const int SCORE_ERROR = -2;  // slave did not answer
@@ -115,6 +116,99 @@ bool readSwitches(uint16_t &states)
 
   states |= (uint16_t)Wire.read() << 8;
   return true;
+}
+
+// ---------- Wiring monitor ----------
+
+// Prints one line describing switch i (0-15) and its new state, e.g.
+//   Switch 3  -> MASTER pin 4  ON
+//   Switch 11 -> SLAVE pin 4  OFF
+void printSwitch(uint8_t i, bool on)
+{
+  Serial.print(F("Switch "));
+  Serial.print(i + 1);
+  Serial.print(i + 1 < 10 ? F("  -> ") : F(" -> "));
+
+  if (i < NUM_LOCAL)
+  {
+    Serial.print(F("MASTER pin "));
+    Serial.print(SWITCH_PINS[i]);
+  }
+  else
+  {
+    Serial.print(F("SLAVE pin "));
+    Serial.print(SWITCH_PINS[i - NUM_LOCAL]);  // slave uses the same pins
+  }
+
+  Serial.println(on ? F("  ON") : F("  OFF"));
+}
+
+// Runs all the time (in every game state) and prints to the Serial Monitor
+// whenever a switch changes or the slave connects/disconnects.
+// Use it to find a bad wire:
+//   - flip a switch and nothing prints     -> that wire is broken/unplugged
+//   - one flip prints ON/OFF many times    -> that wire is loose
+void monitorSwitches()
+{
+  static unsigned long lastCheck = 0;
+  static bool firstRun = true;
+  static bool slaveWasOk = false;
+  static uint16_t lastStates = 0;
+
+  if (millis() - lastCheck < MONITOR_MS)
+  {
+    return;
+  }
+  lastCheck = millis();
+
+  uint16_t states;
+  bool slaveOk = readSwitches(states);
+
+  if (firstRun || slaveOk != slaveWasOk)
+  {
+    Serial.println(slaveOk ? F("SLAVE CONNECTED") : F("SLAVE NOT RESPONDING - check SDA/SCL/GND wires"));
+  }
+
+  // Without the slave only the master's 8 switches can be checked.
+  uint16_t valid = slaveOk ? 0xFFFF : 0x00FF;
+  bool justReconnected = slaveOk && !slaveWasOk && !firstRun;
+
+  if (firstRun || justReconnected)
+  {
+    // List what is already ON (all switches at start-up, or just the
+    // slave's switches when it comes back).
+    uint16_t listMask = firstRun ? valid : 0xFF00;
+    Serial.println(firstRun ? F("Switches ON at start-up:") : F("Slave switches ON:"));
+
+    bool any = false;
+    for (uint8_t i = 0; i < TOTAL_SWITCHES; i++)
+    {
+      if (((listMask >> i) & 1) && ((states >> i) & 1))
+      {
+        printSwitch(i, true);
+        any = true;
+      }
+    }
+    if (!any)
+    {
+      Serial.println(F("  (none)"));
+    }
+  }
+
+  // Report changes (slave switches only if the slave was already connected).
+  uint16_t changed = firstRun ? 0 : (states ^ lastStates) & (justReconnected ? 0x00FF : valid);
+  for (uint8_t i = 0; i < TOTAL_SWITCHES; i++)
+  {
+    if ((changed >> i) & 1)
+    {
+      printSwitch(i, (states >> i) & 1);
+    }
+  }
+
+  // Keep the last known slave bits while it is disconnected.
+  lastStates = slaveOk ? states : (lastStates & 0xFF00) | (states & 0x00FF);
+  slaveWasOk = slaveOk;
+  firstRun = false;
 }
 
 // ---------- Game logic ----------
@@ -251,6 +345,8 @@ void setup()
 
 void loop()
 {
+  monitorSwitches();
+
   // RESET works at any time, even during a splash screen.
   if (resetPressed())
   {

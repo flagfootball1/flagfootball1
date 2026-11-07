@@ -25,6 +25,9 @@ void setup()
     pinMode(SWITCH_PINS[i], INPUT_PULLUP);
   }
 
+  Serial.begin(9600);
+  Serial.println(F("SLAVE READY"));
+
   Wire.begin(I2C_ADDRESS);
   Wire.onRequest(sendSwitches);
 }
@@ -38,6 +41,23 @@ void loop()
     if (digitalRead(SWITCH_PINS[i]) == LOW)
     {
       state |= (1 << i);
+    }
+  }
+
+  // Wiring check: if this board is plugged into the computer, print every
+  // switch change. (The master also prints these as switches 9-16.)
+  uint8_t changed = state ^ switchState;
+  for (uint8_t i = 0; i < NUM_SWITCHES; i++)
+  {
+    if ((changed >> i) & 1)
+    {
+      Serial.print(F("Slave switch "));
+      Serial.print(i + 1);
+      Serial.print(F(" (overall switch "));
+      Serial.print(i + 9);
+      Serial.print(F(") -> SLAVE pin "));
+      Serial.print(SWITCH_PINS[i]);
+      Serial.println(((state >> i) & 1) ? F("  ON") : F("  OFF"));
     }
   }
 
