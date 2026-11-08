@@ -11,6 +11,7 @@ const uint8_t LCD_ADDRESS   = 0x27;
 const uint8_t LCD_COLUMNS   = 16;
 const uint8_t SLAVE_ADDRESS = 8;
 const uint8_t RESET_PIN     = 13;
+const uint8_t SOUND_PIN     = 10;   // "solved" signal to the micro:bit (P1)
 const uint8_t SWITCH_PINS[] = { 2, 3, 4, 5, 6, 7, 8, 9 };
 const uint8_t NUM_LOCAL     = sizeof(SWITCH_PINS);
 const uint8_t TOTAL_SWITCHES = 16;   // 8 local + 8 on the slave
@@ -116,6 +117,16 @@ bool readSwitches(uint16_t &states)
 
   states |= (uint16_t)Wire.read() << 8;
   return true;
+}
+
+// ---------- micro:bit sound signal ----------
+// The micro:bit runs on 3.3V, so this pin must never output 5V (HIGH).
+// It only ever pulls the line to GND (solved) or lets go of it (not solved);
+// the micro:bit's own pull-up holds the line at 3.3V the rest of the time.
+void setSolvedSignal(bool solved)
+{
+  digitalWrite(SOUND_PIN, LOW);  // no pull-up, and LOW when it becomes an output
+  pinMode(SOUND_PIN, solved ? OUTPUT : INPUT);
 }
 
 // ---------- Wiring monitor ----------
@@ -291,6 +302,9 @@ void enterState(GameState newState)
   state = newState;
   stateStart = millis();
 
+  // Tell the micro:bit to play its tune while the puzzle is solved.
+  setSolvedSignal(state == CONGRATS || state == SOLVED);
+
   switch (state)
   {
     case WAITING:
@@ -335,6 +349,7 @@ void setup()
     pinMode(SWITCH_PINS[i], INPUT_PULLUP);
   }
   pinMode(RESET_PIN, INPUT_PULLUP);
+  setSolvedSignal(false);
 
   lcd.init();
   lcd.backlight();
