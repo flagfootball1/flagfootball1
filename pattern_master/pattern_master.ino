@@ -11,7 +11,6 @@ const uint8_t LCD_ADDRESS   = 0x27;
 const uint8_t LCD_COLUMNS   = 16;
 const uint8_t SLAVE_ADDRESS = 8;
 const uint8_t RESET_PIN     = 13;
-const uint8_t SOUND_PIN     = 10;   // "solved" signal to the micro:bit (P1)
 const uint8_t SWITCH_PINS[] = { 2, 3, 4, 5, 6, 7, 8, 9 };
 const uint8_t NUM_LOCAL     = sizeof(SWITCH_PINS);
 const uint8_t TOTAL_SWITCHES = 16;   // 8 local + 8 on the slave
@@ -22,6 +21,8 @@ const char KEY_WORD[] = "TRIANGLE";
 const unsigned long DEBOUNCE_MS     = 50;
 const unsigned long NEW_PATTERN_MS  = 1500;  // "NEW PATTERN" splash
 const unsigned long CONGRATS_MS     = 3000;  // "CONGRATS!" splash
+const unsigned long LONG_PRESS_MS   = 2000;  // hold RESET this long for the wire test
+const unsigned long TEST_INTRO_MS   = 2000;  // "WIRE TEST" title screen
 const unsigned long POLL_MS         = 100;   // how often switches are read
 const unsigned long MONITOR_MS      = 20;    // how often the wiring monitor checks
 
@@ -36,7 +37,8 @@ enum GameState
   NEW_PATTERN,  // showing "NEW PATTERN" splash
   PLAYING,      // showing score, waiting for 16/16
   CONGRATS,     // showing "CONGRATS!" splash
-  SOLVED        // showing the key word until RESET is pressed
+  SOLVED,       // showing the key word until RESET is pressed
+  WIRE_TEST     // showing the live state of all 16 switches
 };
 
 GameState state = WAITING;
@@ -71,12 +73,23 @@ void showScreen(const char *top, const char *bottom)
 
 // ---------- Input ----------
 
-// Non-blocking debounce. Returns true once per press (HIGH -> LOW).
-bool resetPressed()
+enum ButtonEvent
+{
+  NO_PRESS,
+  SHORT_PRESS,  // pressed and let go quickly
+  LONG_PRESS    // held down for LONG_PRESS_MS
+};
+
+// Non-blocking debounce for the RESET button.
+// A short press is reported when the button is let go; a long press is
+// reported as soon as it has been held long enough (only once per hold).
+ButtonEvent readResetButton()
 {
   static bool stableState = HIGH;
   static bool lastReading = HIGH;
   static unsigned long lastChange = 0;
+  static unsigned long pressStart = 0;
+  static bool longReported = false;
 
   bool reading = digitalRead(RESET_PIN);
 
@@ -89,10 +102,25 @@ bool resetPressed()
   if (millis() - lastChange >= DEBOUNCE_MS && reading != stableState)
   {
     stableState = reading;
-    return stableState == LOW;
+
+    if (stableState == LOW)
+    {
+      pressStart = millis();
+      longReported = false;
+    }
+    else if (!longReported)
+    {
+      return SHORT_PRESS;
+    }
   }
 
-  return false;
+  if (stableState == LOW && !longReported && millis() - pressStart >= LONG_PRESS_MS)
+  {
+    longReported = true;
+    return LONG_PRESS;
+  }
+
+  return NO_PRESS;
 }
 
 // Reads all 16 switches into a bitmask (bit i = switch i is ON).
@@ -117,16 +145,6 @@ bool readSwitches(uint16_t &states)
 
   states |= (uint16_t)Wire.read() << 8;
   return true;
-}
-
-// ---------- micro:bit sound signal ----------
-// The micro:bit runs on 3.3V, so this pin must never output 5V (HIGH).
-// It only ever pulls the line to GND (solved) or lets go of it (not solved);
-// the micro:bit's own pull-up holds the line at 3.3V the rest of the time.
-void setSolvedSignal(bool solved)
-{
-  digitalWrite(SOUND_PIN, LOW);  // no pull-up, and LOW when it becomes an output
-  pinMode(SOUND_PIN, solved ? OUTPUT : INPUT);
 }
 
 // ---------- Wiring monitor ----------
@@ -222,6 +240,42 @@ void monitorSwitches()
   firstRun = false;
 }
 
+// ---------- Wire test screen ----------
+
+// Shows every switch as 1 (ON) or 0 (OFF), in order from left to right:
+//   SW 1-8  10010000     <- switches 1-8 (master board)
+//   SW 9-16 00000001     <- switches 9-16 (slave board), or NO SLAVE
+// Flip each switch: if its digit never changes, that wire is broken.
+void showWireTest()
+{
+  uint16_t states;
+  bool slaveOk = readSwitches(states);
+
+  char top[LCD_COLUMNS + 1]    = "SW 1-8  ";
+  char bottom[LCD_COLUMNS + 1] = "SW 9-16 ";
+
+  for (uint8_t i = 0; i < 8; i++)
+  {
+    top[8 + i] = bitRead(states, i) ? '1' : '0';
+  }
+  top[16] = '\0';
+
+  if (slaveOk)
+  {
+    for (uint8_t i = 0; i < 8; i++)
+    {
+      bottom[8 + i] = bitRead(states, i + 8) ? '1' : '0';
+    }
+    bottom[16] = '\0';
+  }
+  else
+  {
+    strcpy(bottom + 8, "NO SLAVE");
+  }
+
+  showScreen(top, bottom);
+}
+
 // ---------- Game logic ----------
 
 void generatePattern()
@@ -302,9 +356,6 @@ void enterState(GameState newState)
   state = newState;
   stateStart = millis();
 
-  // Tell the micro:bit to play its tune while the puzzle is solved.
-  setSolvedSignal(state == CONGRATS || state == SOLVED);
-
   switch (state)
   {
     case WAITING:
@@ -326,6 +377,11 @@ void enterState(GameState newState)
 
     case SOLVED:
       showScreen("FIRST KEY =", KEY_WORD);
+      break;
+
+    case WIRE_TEST:
+      Serial.println(F("WIRE TEST (press RESET to exit)"));
+      showScreen("WIRE TEST", "1=ON  0=OFF");
       break;
   }
 }
@@ -349,12 +405,12 @@ void setup()
     pinMode(SWITCH_PINS[i], INPUT_PULLUP);
   }
   pinMode(RESET_PIN, INPUT_PULLUP);
-  setSolvedSignal(false);
 
   lcd.init();
   lcd.backlight();
   lcd.clear();
 
+  Serial.println(F("Hold RESET for 2 seconds for the wire test screen."));
   enterState(WAITING);
 }
 
@@ -363,11 +419,26 @@ void loop()
   monitorSwitches();
 
   // RESET works at any time, even during a splash screen.
-  if (resetPressed())
+  //   short press -> new game (or leave the wire test)
+  //   hold 2 sec  -> wire test screen
+  ButtonEvent button = readResetButton();
+
+  if (button == LONG_PRESS)
   {
-    Serial.println(F("RESET BUTTON PRESSED"));
-    generatePattern();
-    enterState(NEW_PATTERN);
+    enterState(state == WIRE_TEST ? WAITING : WIRE_TEST);
+  }
+  else if (button == SHORT_PRESS)
+  {
+    if (state == WIRE_TEST)
+    {
+      enterState(WAITING);
+    }
+    else
+    {
+      Serial.println(F("RESET BUTTON PRESSED"));
+      generatePattern();
+      enterState(NEW_PATTERN);
+    }
   }
 
   unsigned long elapsed = millis() - stateStart;
@@ -413,6 +484,13 @@ void loop()
     case SOLVED:
       // Puzzle stays solved: the key remains on screen until RESET,
       // even if the switches are moved afterwards.
+      break;
+
+    case WIRE_TEST:
+      if (elapsed >= TEST_INTRO_MS && pollDue())
+      {
+        showWireTest();
+      }
       break;
   }
 }
