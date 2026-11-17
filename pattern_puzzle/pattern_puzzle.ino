@@ -40,6 +40,15 @@ const unsigned long MONITOR_MS     = 20;    // how often the Serial wiring monit
 
 Adafruit_LiquidCrystal lcd(LCD_ADDRESS);
 
+// Types are defined here, before any functions, because the Arduino IDE
+// adds function declarations above the first function automatically.
+enum ButtonEvent
+{
+  NO_PRESS,
+  SHORT_PRESS,  // pressed and let go quickly
+  LONG_PRESS    // held down for LONG_PRESS_MS
+};
+
 enum GameState
 {
   WAITING,      // power-up, waiting for first RESET
@@ -81,13 +90,6 @@ void showScreen(const char *top, const char *bottom)
 }
 
 // ---------- Input ----------
-
-enum ButtonEvent
-{
-  NO_PRESS,
-  SHORT_PRESS,  // pressed and let go quickly
-  LONG_PRESS    // held down for LONG_PRESS_MS
-};
 
 // Non-blocking debounce for the RESET button.
 // A short press is reported when the button is let go; a long press is
