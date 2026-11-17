@@ -7,15 +7,15 @@
 //   Switches 1-8   -> pins 2-9    (other side of each switch -> GND)
 //   Switches 9-16  -> pins 22-29  (other side of each switch -> GND)
 //   RESET button   -> pin 13      (other side -> GND)
-//   LCD backpack   -> DAT = pin 20 (SDA), CLK = pin 21 (SCL), 5V = 5V, GND = GND
-//                     (Adafruit I2C/SPI character LCD backpack, I2C mode)
+//   LCD (I2C)      -> SDA = pin 20, SCL = pin 21, VCC = 5V, GND = GND
+//                     (PCF8574 I2C backpack at address 0x27)
 // No resistors needed: the Mega's built-in pull-ups are used.
 
 #include <Wire.h>
-#include <Adafruit_LiquidCrystal.h>  // Library Manager: "Adafruit LiquidCrystal"
+#include <LiquidCrystal_I2C.h>  // Library Manager: "LiquidCrystal I2C" by Frank de Brabander
 
 // ---------- Hardware ----------
-const uint8_t LCD_ADDRESS = 0;  // Adafruit backpack: 0 = address 0x20 (no jumpers soldered)
+const uint8_t LCD_ADDRESS = 0x27;  // found with the I2C scanner
 const uint8_t LCD_COLUMNS = 16;
 const uint8_t RESET_PIN   = 13;
 
@@ -38,7 +38,7 @@ const unsigned long TEST_INTRO_MS  = 2000;  // "WIRE TEST" title screen
 const unsigned long POLL_MS        = 100;   // how often the game/LCD checks switches
 const unsigned long MONITOR_MS     = 20;    // how often the Serial wiring monitor checks
 
-Adafruit_LiquidCrystal lcd(LCD_ADDRESS);
+LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLUMNS, 2);
 
 // Types are defined here, before any functions, because the Arduino IDE
 // adds function declarations above the first function automatically.
@@ -331,8 +331,8 @@ void setup()
   }
   pinMode(RESET_PIN, INPUT_PULLUP);
 
-  lcd.begin(LCD_COLUMNS, 2);
-  lcd.setBacklight(HIGH);
+  lcd.init();
+  lcd.backlight();
   lcd.clear();
 
 #if defined(WIRE_HAS_TIMEOUT)
