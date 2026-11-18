@@ -3,6 +3,15 @@
 // Press RESET to generate a random target pattern; match all 16 switches
 // to reveal the key word. Hold RESET for 2 seconds for the wire test screen.
 //
+// Wire checks (no extra hardware needed):
+//   - Loose wire: if a switch flickers ON/OFF fast (a wire making bad contact),
+//     the LCD shows the switch and pin for 3 seconds, then goes back to the
+//     game. It is also printed on the Serial Monitor.
+//   - Wire test: hold RESET 2 s, flip every switch ON once, press RESET.
+//     Any switch that never turned ON is listed as NOT CONNECTED.
+//   Note: a wire that comes cleanly undone reads the same as a switch that
+//   is OFF, so it can only be found with the wire test.
+//
 // Wiring (Mega 2560):
 //   Switches 1-8   -> pins 2-9    (other side of each switch -> GND)
 //   Switches 9-16  -> pins 22-29  (other side of each switch -> GND)
@@ -38,6 +47,14 @@ const unsigned long TEST_INTRO_MS  = 2000;  // "WIRE TEST" title screen
 const unsigned long POLL_MS        = 100;   // how often the game/LCD checks switches
 const unsigned long MONITOR_MS     = 20;    // how often the Serial wiring monitor checks
 
+// Loose-wire detection: a switch that changes this many times within
+// LOOSE_WINDOW_MS is treated as a loose wire (a person flipping a switch
+// changes it once).
+const uint8_t       LOOSE_CHANGES     = 6;
+const unsigned long LOOSE_WINDOW_MS   = 1000;
+const unsigned long LOOSE_COOLDOWN_MS = 5000;  // don't repeat the same alert sooner
+const unsigned long ALERT_MS          = 3000;  // how long a wire alert stays on the LCD
+
 LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLUMNS, 2);
 
 // Types are defined here, before any functions, because the Arduino IDE
@@ -64,6 +81,10 @@ unsigned long stateStart = 0;
 uint16_t targetPattern = 0;  // bit i = required state of switch i+1
 int lastShownScore = -1;     // -1 = nothing shown yet (forces a redraw)
 
+bool alertActive = false;            // a wire alert is on the LCD
+unsigned long alertStart = 0;
+uint16_t wireTestSeenOn = 0;         // switches that turned ON during the wire test
+
 // ---------- LCD helpers ----------
 
 // Prints text on a row and pads with spaces so leftovers from the
@@ -83,8 +104,15 @@ void showLine(uint8_t row, const char *text)
   }
 }
 
+// Normal screens. While a wire alert is showing they are skipped; the
+// current screen is redrawn when the alert ends.
 void showScreen(const char *top, const char *bottom)
 {
+  if (alertActive)
+  {
+    return;
+  }
+
   showLine(0, top);
   showLine(1, bottom);
 }
@@ -150,6 +178,15 @@ uint16_t readSwitches()
   return states;
 }
 
+// Shows a message for ALERT_MS, then the game screen comes back.
+void showAlert(const char *top, const char *bottom)
+{
+  alertActive = true;
+  alertStart = millis();
+  showLine(0, top);
+  showLine(1, bottom);
+}
+
 // ---------- Wiring monitor (Serial Monitor, 9600 baud) ----------
 
 // Prints e.g. "Switch 11 -> pin 24  ON"
@@ -160,6 +197,49 @@ void printSwitch(uint8_t i, bool on)
   Serial.print(i + 1 < 10 ? F("  -> pin ") : F(" -> pin "));
   Serial.print(SWITCH_PINS[i]);
   Serial.println(on ? F("  ON") : F("  OFF"));
+}
+
+// Called every time switch i changes. If it changes too often in a short
+// time, the wire is making bad contact: show it on the LCD and Serial.
+void checkLooseWire(uint8_t i)
+{
+  static unsigned long windowStart[16];
+  static uint8_t changes[16];
+  static unsigned long lastAlert[16];
+  static bool alerted[16];
+
+  unsigned long now = millis();
+
+  if (now - windowStart[i] > LOOSE_WINDOW_MS)
+  {
+    windowStart[i] = now;
+    changes[i] = 0;
+  }
+  changes[i]++;
+
+  if (changes[i] < LOOSE_CHANGES)
+  {
+    return;
+  }
+  changes[i] = 0;
+
+  if (alerted[i] && now - lastAlert[i] < LOOSE_COOLDOWN_MS)
+  {
+    return;
+  }
+  alerted[i] = true;
+  lastAlert[i] = now;
+
+  // LCD first: Serial printing at 9600 baud is slow.
+  char bottom[LCD_COLUMNS + 1];
+  snprintf(bottom, sizeof(bottom), "SW %d = PIN %d", i + 1, SWITCH_PINS[i]);
+  showAlert("LOOSE WIRE!", bottom);
+
+  Serial.print(F("*** LOOSE WIRE: Switch "));
+  Serial.print(i + 1);
+  Serial.print(F(" -> pin "));
+  Serial.print(SWITCH_PINS[i]);
+  Serial.println(F(" is flickering ON/OFF - check this wire and its GND wire ***"));
 }
 
 // Runs all the time (in every game state) and prints whenever a switch
@@ -189,13 +269,23 @@ void monitorSwitches()
     }
   }
 
-  uint16_t toPrint = firstRun ? states : (states ^ lastStates);
+  uint16_t changed = firstRun ? 0 : (states ^ lastStates);
+  uint16_t toPrint = firstRun ? states : changed;
   for (uint8_t i = 0; i < TOTAL_SWITCHES; i++)
   {
     if ((toPrint >> i) & 1)
     {
       printSwitch(i, (states >> i) & 1);
     }
+    if ((changed >> i) & 1)
+    {
+      checkLooseWire(i);
+    }
+  }
+
+  if (state == WIRE_TEST)
+  {
+    wireTestSeenOn |= states;
   }
 
   lastStates = states;
@@ -224,6 +314,61 @@ void showWireTest()
   bottom[16] = '\0';
 
   showScreen(top, bottom);
+}
+
+// Leaving the wire test: report every switch that never turned ON.
+void finishWireTest()
+{
+  uint16_t missing = ~wireTestSeenOn;  // one bit per switch (16 switches)
+
+  enterState(WAITING);
+
+  if (missing == 0)
+  {
+    showAlert("WIRE TEST OK", "ALL 16 WORKING");
+    Serial.println(F("WIRE TEST RESULT: all 16 switches turned ON - all connected"));
+    return;
+  }
+
+  // Build the LCD line, e.g. "SW 7 12". If it doesn't fit, it ends with "+".
+  char bottom[LCD_COLUMNS + 1] = "SW";
+  uint8_t len = 2;
+
+  for (uint8_t i = 0; i < TOTAL_SWITCHES; i++)
+  {
+    if ((missing >> i) & 1)
+    {
+      char num[4];
+      uint8_t n = snprintf(num, sizeof(num), " %d", i + 1);
+      if (len + n <= LCD_COLUMNS - 1)
+      {
+        strcpy(bottom + len, num);
+        len += n;
+      }
+      else
+      {
+        strcpy(bottom + len, "+");
+        break;
+      }
+    }
+  }
+
+  // LCD first: Serial printing at 9600 baud is slow.
+  showAlert("NOT CONNECTED:", bottom);
+
+  // Full list on the Serial Monitor.
+  Serial.println(F("WIRE TEST RESULT: these switches never turned ON (not connected?):"));
+  for (uint8_t i = 0; i < TOTAL_SWITCHES; i++)
+  {
+    if ((missing >> i) & 1)
+    {
+      Serial.print(F("  Switch "));
+      Serial.print(i + 1);
+      Serial.print(F(" -> pin "));
+      Serial.print(SWITCH_PINS[i]);
+      Serial.println(F("  check this wire and its GND wire"));
+    }
+  }
 }
 
 // ---------- Game logic ----------
@@ -282,11 +427,10 @@ void showScore(int score)
   showScreen("MISSION ACTIVE", line);
 }
 
-void enterState(GameState newState)
+// Draws the screen for the current state (used when entering a state and
+// when a wire alert ends).
+void drawStateScreen()
 {
-  state = newState;
-  stateStart = millis();
-
   switch (state)
   {
     case WAITING:
@@ -298,11 +442,10 @@ void enterState(GameState newState)
       break;
 
     case PLAYING:
-      lastShownScore = -1;  // force the score to be drawn
+      lastShownScore = -1;  // force the score to be drawn on the next check
       break;
 
     case CONGRATS:
-      Serial.println(F("SOLVED"));
       showScreen(" CONGRATS!", "16/16 CORRECT");
       break;
 
@@ -311,9 +454,44 @@ void enterState(GameState newState)
       break;
 
     case WIRE_TEST:
-      Serial.println(F("WIRE TEST (press RESET to exit)"));
-      showScreen("WIRE TEST", "1=ON  0=OFF");
+      if (millis() - stateStart < TEST_INTRO_MS)
+      {
+        showScreen("WIRE TEST", "FLIP EACH ON");
+      }
+      else
+      {
+        showWireTest();
+      }
       break;
+  }
+}
+
+void enterState(GameState newState)
+{
+  state = newState;
+  stateStart = millis();
+
+  if (state == CONGRATS)
+  {
+    Serial.println(F("SOLVED"));
+  }
+  if (state == WIRE_TEST)
+  {
+    wireTestSeenOn = 0;
+    Serial.println(F("WIRE TEST: flip every switch ON once, then press RESET."));
+    Serial.println(F("Any switch that never turns ON will be listed."));
+  }
+
+  drawStateScreen();
+}
+
+// Ends a wire alert after ALERT_MS and puts the game screen back.
+void updateAlert()
+{
+  if (alertActive && millis() - alertStart >= ALERT_MS)
+  {
+    alertActive = false;
+    drawStateScreen();
   }
 }
 
@@ -341,12 +519,14 @@ void setup()
 #endif
 
   Serial.println(F("Hold RESET for 2 seconds for the wire test screen."));
+  Serial.println(F("Loose wires (switches flickering ON/OFF) are reported automatically."));
   enterState(WAITING);
 }
 
 void loop()
 {
   monitorSwitches();
+  updateAlert();
 
   // RESET works at any time, even during a splash screen.
   //   short press -> new game (or leave the wire test)
@@ -355,13 +535,20 @@ void loop()
 
   if (button == LONG_PRESS)
   {
-    enterState(state == WIRE_TEST ? WAITING : WIRE_TEST);
+    if (state == WIRE_TEST)
+    {
+      finishWireTest();
+    }
+    else
+    {
+      enterState(WIRE_TEST);
+    }
   }
   else if (button == SHORT_PRESS)
   {
     if (state == WIRE_TEST)
     {
-      enterState(WAITING);
+      finishWireTest();
     }
     else
     {
